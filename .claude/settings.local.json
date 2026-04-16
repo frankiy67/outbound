@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(node -e \"require\\('duckdb'\\); console.log\\('ok'\\)\")",
+      "Bash(node:*)",
+      "Bash(npx tsc:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.insee.fr)",
+      "WebFetch(domain:www.insee.fr)",
+      "Bash(python3:*)",
+      "Bash(npm run:*)",
+      "Bash(grep -v \"Use \\\\`node\")",
+      "Bash(grep -v \"Use \\\\`\")"
+    ]
+  }
+}

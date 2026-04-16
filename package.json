@@ -1,0 +1,40 @@
+{
+  "name": "outbound-zero",
+  "version": "1.0.0",
+  "description": "Zero-cost outbound automation pipeline",
+  "main": "dist/orchestrator.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/orchestrator.js",
+    "dev": "node --experimental-sqlite --require ts-node/register src/orchestrator.ts",
+    "export": "node --experimental-sqlite --require ts-node/register src/export-excel.ts",
+    "export:restaurants": "node --experimental-sqlite --require ts-node/register src/export-excel.ts restaurants",
+    "artisans": "node --experimental-sqlite --require ts-node/register src/artisans.ts",
+    "export:artisans": "node --experimental-sqlite --require ts-node/register src/export-artisans.ts",
+    "restaurants": "node --experimental-sqlite --require ts-node/register src/restaurants.ts",
+    "smtp-test": "node --require ts-node/register src/contacts.ts --test-smtp"
+  },
+  "dependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "adm-zip": "^0.5.17",
+    "cheerio": "^1.0.0",
+    "csv-parse": "^5.5.3",
+    "dotenv": "^16.4.5",
+    "duckdb": "^1.4.4",
+    "node-cron": "^3.0.3",
+    "node-fetch": "^2.7.0",
+    "nodemailer": "^6.9.13",
+    "pino": "^9.1.0",
+    "unzipper": "^0.12.3",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/node-fetch": "^2.6.11",
+    "@types/nodemailer": "^6.4.14",
+    "@types/unzipper": "^0.10.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
