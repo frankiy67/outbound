@@ -12,7 +12,8 @@
     "artisans": "node --experimental-sqlite --require ts-node/register src/artisans.ts",
     "export:artisans": "node --experimental-sqlite --require ts-node/register src/export-artisans.ts",
     "restaurants": "node --experimental-sqlite --require ts-node/register src/restaurants.ts",
-    "smtp-test": "node --require ts-node/register src/contacts.ts --test-smtp"
+    "generate:queries": "node --experimental-sqlite --require ts-node/register src/generate-queries-from-sirene.ts",
+    "gmaps:stats": "node --require ts-node/register src/gmaps-reader.ts --stats"
   },
   "dependencies": {
     "@types/adm-zip": "^0.5.8",
