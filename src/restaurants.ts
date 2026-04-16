@@ -28,6 +28,7 @@ import {
   randomUA,
   type ContactResult,
 } from './contacts';
+import { findGmapsMatch, gmapsCsvExists } from './gmaps-reader';
 import { DATA_DIR } from './config';
 
 const logger = pino({ level: 'info' });
@@ -41,22 +42,19 @@ const RESTAURANT_NAF = ['56.10A', '56.10B', '56.21Z', '56.30Z'];
 
 interface RestaurantRecord {
   siren: string;
+  siret: string;
   company_name: string;
   city: string;
   postal_code: string;
   naf_code: string;
   headcount_tranche: string;
-  // Places API enrichment
-  place_id: string | null;
   website: string | null;
   phone: string | null;
   rating: number | null;
   user_ratings_total: number | null;
-  // Website scoring
   opportunity_score: number;
   opportunity_tier: 'hot' | 'warm' | 'cold';
   signals: string[];
-  // Contact finding
   contact_name: string | null;
   email: string | null;
   email_status: ContactResult['email_status'];
@@ -142,87 +140,15 @@ function isGhostListing(rec: RestaurantRecord): boolean {
   return rec.user_ratings_total === 0 && rec.website === null;
 }
 
-// ── Module 2: Google Maps Places enrichment ───────────────────────────────────
+// ── Module 2: gmaps-scraper enrichment ───────────────────────────────────────
 
-interface PlaceSearchResult {
-  place_id: string;
-  name: string;
-  formatted_address: string;
-  rating?: number;
-  user_ratings_total?: number;
-}
-
-async function placesTextSearch(
-  apiKey: string,
-  query: string,
-): Promise<PlaceSearchResult | null> {
-  const url =
-    `https://maps.googleapis.com/maps/api/place/textsearch/json` +
-    `?query=${encodeURIComponent(query)}&type=restaurant&key=${apiKey}`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const data = await res.json() as {
-      status: string;
-      results?: PlaceSearchResult[];
-    };
-    if (data.status !== 'OK' || !data.results?.length) return null;
-    return data.results[0];
-  } catch {
-    return null;
-  }
-}
-
-async function placesDetails(
-  apiKey: string,
-  placeId: string,
-): Promise<{ website: string | null; phone: string | null }> {
-  const url =
-    `https://maps.googleapis.com/maps/api/place/details/json` +
-    `?place_id=${placeId}` +
-    `&fields=website,formatted_phone_number` +
-    `&key=${apiKey}`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return { website: null, phone: null };
-    const data = await res.json() as {
-      status: string;
-      result?: { website?: string; formatted_phone_number?: string };
-    };
-    if (data.status !== 'OK' || !data.result) return { website: null, phone: null };
-    return {
-      website: data.result.website ?? null,
-      phone:   data.result.formatted_phone_number ?? null,
-    };
-  } catch {
-    return { website: null, phone: null };
-  }
-}
-
-async function enrichRestaurantWithPlaces(
-  apiKey: string,
-  companyName: string,
-  city: string,
-): Promise<{
-  place_id: string | null;
-  website: string | null;
-  phone: string | null;
-  rating: number | null;
-  user_ratings_total: number | null;
-}> {
-  const query = `${companyName} restaurant ${city}`;
-  const hit = await placesTextSearch(apiKey, query);
-  if (!hit) {
-    return { place_id: null, website: null, phone: null, rating: null, user_ratings_total: null };
-  }
-  const details = await placesDetails(apiKey, hit.place_id);
-  return {
-    place_id:           hit.place_id,
-    website:            details.website,
-    phone:              details.phone,
-    rating:             hit.rating             ?? null,
-    user_ratings_total: hit.user_ratings_total ?? null,
-  };
+async function enrichRestaurantWithGmaps(rec: RestaurantRecord): Promise<void> {
+  const match = findGmapsMatch(rec.siret, rec.company_name, rec.postal_code);
+  if (!match) return;
+  if (match.website)            rec.website            = match.website;
+  if (match.phone)              rec.phone              = match.phone;
+  if (match.rating !== null)    rec.rating             = match.rating;
+  if (match.reviewCount !== null) rec.user_ratings_total = match.reviewCount;
 }
 
 // ── Module 3b: Contact finding for restaurants with a domain ─────────────────
@@ -697,8 +623,20 @@ async function main(): Promise<void> {
   const flags = [cli.go ? 'SEND' : 'DRY RUN', ...(cli.noWebsiteOnly ? ['--no-website-only'] : [])].join(' | ');
   console.log(`City: ${cli.city} | Limit: ${cli.limit} | ${flags}\n`);
 
-  const apiKey = process.env['GOOGLE_MAPS_API_KEY'] ?? '';
-  if (!apiKey) logger.warn('GOOGLE_MAPS_API_KEY not set — Places enrichment will be skipped');
+  if (!gmapsCsvExists()) {
+    console.error('\n⚠️  No Google Maps data found.');
+    console.error('');
+    console.error('Follow these steps:');
+    console.error(`  1. npm run generate:queries -- --city "${cli.city}"`);
+    console.error(`  2. Run scraper on Mac:`);
+    console.error(`       google-maps-scraper \\`);
+    console.error(`         --input "D:/outbound-data/queries-sirene.txt" \\`);
+    console.error(`         --output "D:/outbound-data/gmaps-results.csv" \\`);
+    console.error(`         --lang fr --depth 1`);
+    console.error(`  3. Copy CSV to D:\\outbound-data\\`);
+    console.error(`  4. Run again`);
+    process.exit(1);
+  }
 
   // ── Module 1: Source from SIRENE ──────────────────────────────────────────
   console.log('[1/4] Sourcing restaurants from SIRENE...');
@@ -711,8 +649,6 @@ async function main(): Promise<void> {
   });
   console.log(`      → ${companies.length} restaurants found`);
 
-  // Pre-Places filters: chains and generic legal shells — no point paying for
-  // API calls on companies we'd discard anyway.
   const preFiltered = companies.filter(c => {
     const name = c.company_name?.trim() ?? '';
     if (isChain(name))            return false;
@@ -725,49 +661,29 @@ async function main(): Promise<void> {
   }
   console.log();
 
-  // ── Module 2: Google Maps Places enrichment ───────────────────────────────
-  console.log('[2/4] Enriching with Google Maps Places...');
-  let restaurants: RestaurantRecord[];
+  // ── Module 2: gmaps-scraper enrichment ───────────────────────────────────
+  console.log('[2/4] Enriching with Google Maps scraper data...');
+  let restaurants: RestaurantRecord[] = preFiltered.map(c => ({
+    ...c,
+    siret:              c.siret,
+    website:            null,
+    phone:              null,
+    rating:             null,
+    user_ratings_total: null,
+    opportunity_score:  0,
+    opportunity_tier:   'cold' as const,
+    signals:            [],
+    contact_name:       null,
+    email:              null,
+    email_status:       'unknown' as const,
+    email_confidence:   0,
+  }));
 
-  if (apiKey) {
-    const tasks = preFiltered.map(c => async (): Promise<RestaurantRecord> => {
-      if (!c.company_name?.trim()) {
-        return {
-          ...c, place_id: null, website: null, phone: null,
-          rating: null, user_ratings_total: null,
-          opportunity_score: 0, opportunity_tier: 'cold', signals: [],
-          contact_name: null, email: null, email_status: 'unknown', email_confidence: 0,
-        };
-      }
-      const place = await enrichRestaurantWithPlaces(apiKey, c.company_name, c.city);
-      return {
-        siren:              c.siren,
-        company_name:       c.company_name,
-        city:               c.city,
-        postal_code:        c.postal_code,
-        naf_code:           c.naf_code,
-        headcount_tranche:  c.headcount_tranche,
-        ...place,
-        opportunity_score:  0,
-        opportunity_tier:   'cold',
-        signals:            [],
-        contact_name:       null,
-        email:              null,
-        email_status:       'unknown' as const,
-        email_confidence:   0,
-      };
-    });
-    restaurants = await runWithConcurrency(tasks, 5);
-  } else {
-    restaurants = preFiltered.map(c => ({
-      ...c, place_id: null, website: null, phone: null,
-      rating: null, user_ratings_total: null,
-      opportunity_score: 0, opportunity_tier: 'cold' as const, signals: [],
-      contact_name: null, email: null, email_status: 'unknown' as const, email_confidence: 0,
-    }));
-  }
+  const enrichTasks = restaurants.map(rec => async (): Promise<void> => {
+    await enrichRestaurantWithGmaps(rec);
+  });
+  await runWithConcurrency(enrichTasks, 20);
 
-  // Post-Places filter: ghost listings (0 reviews + no website = likely closed/unclaimed).
   const beforeGhost = restaurants.length;
   restaurants = restaurants.filter(r => !isGhostListing(r));
   const ghostRemoved = beforeGhost - restaurants.length;
@@ -776,7 +692,8 @@ async function main(): Promise<void> {
   }
 
   const withWebsite = restaurants.filter(r => r.website).length;
-  console.log(`      → ${withWebsite}/${restaurants.length} have a website on Google Maps\n`);
+  const withPhone   = restaurants.filter(r => r.phone).length;
+  console.log(`      → ${withWebsite}/${restaurants.length} have website, ${withPhone} have phone\n`);
 
   // ── Module 3: Website opportunity scoring ─────────────────────────────────
   console.log('[3a/4] Scoring web presence...');

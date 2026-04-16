@@ -12,8 +12,12 @@ import * as path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR } from './config';
 
-const SIRENE_DB = path.join(DATA_DIR, 'sirene.db');
+const SIRENE_DB   = path.join(DATA_DIR, 'sirene.db');
 const OUTPUT_FILE = path.join(DATA_DIR, 'queries-sirene.txt');
+
+// Possible locations for StockUniteLegale (parquet or CSV)
+const UNITE_LEGALE_PARQUET = path.join(DATA_DIR, 'StockUniteLegale_utf8.parquet');
+const UNITE_LEGALE_CSV     = path.join(DATA_DIR, 'StockUniteLegale_utf8.csv');
 
 const NAF_LABEL: Record<string, string> = {
   '43.21A': 'Électricien',
@@ -45,6 +49,21 @@ function getArg(flag: string): string | null {
   return idx !== -1 && process.argv[idx + 1] ? process.argv[idx + 1] : null;
 }
 
+// ── [ND] helpers ──────────────────────────────────────────────────────────────
+
+function isND(s: string | null | undefined): boolean {
+  if (!s) return true;
+  const t = s.trim();
+  return t === '' || t === '[ND]';
+}
+
+function cleanField(s: string | null | undefined): string | null {
+  if (isND(s)) return null;
+  return s!.trim();
+}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
 interface SireneRow {
   siren: string;
   denominationUsuelleEtablissement: string | null;
@@ -54,20 +73,76 @@ interface SireneRow {
 }
 
 function buildName(row: SireneRow): string | null {
-  // Priority 1: denominationUsuelleEtablissement
-  if (row.denominationUsuelleEtablissement?.trim()) {
-    return row.denominationUsuelleEtablissement.trim();
-  }
-  // Priority 2: enseigne1Etablissement
-  if (row.enseigne1Etablissement?.trim()) {
-    return row.enseigne1Etablissement.trim();
-  }
-  return null;
+  return cleanField(row.denominationUsuelleEtablissement)
+      ?? cleanField(row.enseigne1Etablissement)
+      ?? null;
 }
+
+// ── DuckDB lookup for [ND] names ──────────────────────────────────────────────
+// Tries StockUniteLegale parquet (or CSV) to recover prenom+nom for sole traders.
+// Returns a map of siren → "PRENOM NOM"
+
+async function loadUniteLegaleNames(sirens: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (sirens.length === 0) return result;
+
+  const parquetExists = fs.existsSync(UNITE_LEGALE_PARQUET);
+  const csvExists     = fs.existsSync(UNITE_LEGALE_CSV);
+
+  if (!parquetExists && !csvExists) return result;
+
+  try {
+    // Dynamic import so the script still runs if duckdb isn't working
+    const duckdb = await import('duckdb');
+    const db     = new duckdb.Database(':memory:');
+    const conn   = db.connect();
+
+    const source = parquetExists
+      ? `read_parquet('${UNITE_LEGALE_PARQUET.replace(/\\/g, '/')}')`
+      : `read_csv_auto('${UNITE_LEGALE_CSV.replace(/\\/g, '/')}')`;
+
+    const sirenList = sirens.map(s => `'${s}'`).join(',');
+
+    const sql = `
+      SELECT siren,
+             COALESCE(NULLIF(TRIM(prenomUsuelUniteLegale), ''), NULLIF(TRIM(prenom1UniteLegale), '')) AS prenom,
+             NULLIF(TRIM(nomUniteLegale), '') AS nom
+      FROM ${source}
+      WHERE siren IN (${sirenList})
+        AND nomUniteLegale IS NOT NULL
+        AND nomUniteLegale != ''
+        AND nomUniteLegale != '[ND]'
+    `;
+
+    await new Promise<void>((resolve, reject) => {
+      conn.all(sql, (err: Error | null, rows: Array<Record<string, string>>) => {
+        if (err) { reject(err); return; }
+        for (const row of rows) {
+          const prenom = row['prenom']?.trim() ?? '';
+          const nom    = row['nom']?.trim()    ?? '';
+          if (nom) {
+            result.set(row['siren'], [prenom, nom].filter(Boolean).join(' ').toUpperCase());
+          }
+        }
+        resolve();
+      });
+    });
+
+    conn.close();
+    db.close();
+  } catch (err) {
+    // DuckDB unavailable or file unreadable — skip silently
+    process.stderr.write(`[DuckDB] Skipping UniteLegale lookup: ${(err as Error).message}\n`);
+  }
+
+  return result;
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const tradeArg = getArg('--trade');
-  const cityArg = getArg('--city');
+  const cityArg  = getArg('--city');
 
   if (!fs.existsSync(SIRENE_DB)) {
     console.error(`\n⚠️  SIRENE database not found at: ${SIRENE_DB}`);
@@ -76,7 +151,6 @@ async function main(): Promise<void> {
 
   const db = new DatabaseSync(SIRENE_DB);
 
-  // Determine NAF codes to query
   let nafCodes: string[] = Object.keys(NAF_LABEL);
   if (tradeArg) {
     const key = tradeArg.toLowerCase();
@@ -114,19 +188,47 @@ async function main(): Promise<void> {
   const rows = db.prepare(sql).all(...params) as unknown as SireneRow[];
   db.close();
 
+  // ── Collect sirens with no name for DuckDB fallback ───────────────────────
+  const ndSirens = rows
+    .filter(r => buildName(r) === null)
+    .map(r => r.siren);
+
+  const uniteLegaleNames = await loadUniteLegaleNames(ndSirens);
+
+  if (uniteLegaleNames.size > 0) {
+    console.log(`  [DuckDB] Recovered ${uniteLegaleNames.size} names from StockUniteLegale`);
+  }
+
+  // ── Build queries ─────────────────────────────────────────────────────────
   const queries: string[] = [];
+  let skippedNoName = 0;
+
+  const tradeLabel = tradeArg
+    ? (NAF_LABEL[TRADE_NAF[tradeArg.toLowerCase()]?.[0]] ?? tradeArg)
+    : 'all trades';
 
   for (const row of rows) {
-    const name = buildName(row);
-    if (!name) continue;
+    const siren = (row.siren || '').trim();
 
-    const city   = (row.city   || '').trim();
-    const postal = (row.postal_code || '').trim();
-    const siren  = (row.siren || '').trim();
+    // Name: SIRENE field → DuckDB fallback → skip
+    let name = buildName(row);
+    if (!name) {
+      const fallback = uniteLegaleNames.get(siren);
+      if (fallback) {
+        // Format: "PRENOM NOM electricien CITY" (no postal — individual, likely no number)
+        const city = cleanField(row.city) ?? '';
+        const parts = [fallback, tradeLabel, city].filter(Boolean);
+        queries.push(`${parts.join(' ')} #!#${siren}`);
+        continue;
+      }
+      skippedNoName++;
+      continue;
+    }
+
+    const city   = cleanField(row.city)        ?? '';
+    const postal = cleanField(row.postal_code) ?? '';   // rule 2+3: [ND] → omit, don't skip
 
     // Format: "{NAME} {CITY} {POSTAL_CODE} #!#{SIREN}"
-    // Note: SIRENE DB stores siren (9 digits). SIRET = siren + 5-digit NIC.
-    // The #!# tag is used by gmaps-reader for SIRET matching; siren is the fallback.
     const parts = [name];
     if (city)   parts.push(city);
     if (postal) parts.push(postal);
@@ -136,8 +238,7 @@ async function main(): Promise<void> {
 
   fs.writeFileSync(OUTPUT_FILE, queries.join('\n'), 'utf-8');
 
-  const tradeLabel = tradeArg ? (NAF_LABEL[TRADE_NAF[tradeArg.toLowerCase()]?.[0]] ?? tradeArg) : 'all trades';
-  console.log(`\n✅ Generated ${queries.length} queries (${tradeLabel}${cityArg ? ` in ${cityArg}` : ''})`);
+  console.log(`\n✅ ${queries.length} queries generated (${skippedNoName} skipped — no name)`);
   console.log(`📄 Output: ${OUTPUT_FILE}`);
   console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   console.log(`Next step — run the scraper on your Mac:`);
@@ -148,6 +249,12 @@ async function main(): Promise<void> {
   console.log(`    --lang fr \\`);
   console.log(`    --depth 1`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+
+  if (!fs.existsSync(UNITE_LEGALE_PARQUET) && !fs.existsSync(UNITE_LEGALE_CSV)) {
+    console.log(`💡 Tip: place StockUniteLegale_utf8.parquet in D:\\outbound-data\\ to recover`);
+    console.log(`   names for the ${skippedNoName} skipped entries.`);
+    console.log(`   Download: https://www.data.gouv.fr/fr/datasets/base-sirene-des-entreprises-et-de-leurs-etablissements-siren-siret/\n`);
+  }
 }
 
 main().catch(err => {

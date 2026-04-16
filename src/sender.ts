@@ -214,15 +214,7 @@ export function startScheduler(): void {
 
 // --- Preview ---
 export function writePreview(leads: ScoredLead[]): void {
-  console.log(`writePreview received ${leads.length} leads`);
-  if (leads.length > 0) {
-    console.log('First lead keys:', Object.keys(leads[0]));
-    console.log('First lead company_name:', leads[0].company_name);
-    console.log('First lead domain:', leads[0].domain);
-    console.log('First lead phone:', leads[0].phone);
-  }
   const withName = leads.filter(lead => lead.company_name);
-  console.log(`  → ${withName.length}/${leads.length} passed company_name filter`);
   const preview = withName
     .map(lead => ({
       company: lead.company_name,

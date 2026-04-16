@@ -58,10 +58,6 @@ function exportAccounting(): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const data: Record<string, any>[] = JSON.parse(fs.readFileSync(PREVIEW_PATH, 'utf-8'));
 
-  const sample = data[0];
-  console.log('All fields in JSON:', Object.keys(sample));
-  console.log('company:', sample.company, '| company_name:', sample.company_name);
-  console.log('domain :', sample.domain,  '| phone:', sample.phone);
   console.log(`\nExporting ${data.length} leads → ${OUTPUT_PATH}`);
 
   const HEADERS = [
