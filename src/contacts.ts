@@ -137,7 +137,7 @@ async function processCompany(company: CompanyRecord): Promise<ContactRecord> {
 
   // Step 1: gmaps email
   if (name) {
-    const gmaps = findGmapsMatch(company.siret, name, company.postal_code || '');
+    const gmaps = findGmapsMatch(company.siret, name, company.postal_code || '', company.domain, company.phone);
     if (gmaps?.gmapsEmail) {
       logger.info({ company: name, email: gmaps.gmapsEmail }, 'Email from gmaps');
       return {

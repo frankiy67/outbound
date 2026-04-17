@@ -137,7 +137,7 @@ export async function enrichWithDomains(companies: CompanyRecord[]): Promise<Com
     logger.info({ company: name }, 'Enriching with domain/phone...');
 
     // ── Strategy 1: Google Maps CSV match ──────────────────────────────────
-    const gmaps = findGmapsMatch(company.siret, name, company.postal_code || '');
+    const gmaps = findGmapsMatch(company.siret, name, company.postal_code || '', company.domain, company.phone);
 
     if (gmaps) {
       logger.info(

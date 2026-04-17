@@ -210,7 +210,7 @@ function isSocialOrPlatformUrl(url: string): boolean {
 // ── Module 2: gmaps-scraper enrichment ───────────────────────────────────────
 
 async function enrichArtisanWithGmaps(rec: ArtisanRecord): Promise<void> {
-  const match = findGmapsMatch(rec.siret, rec.company_name, rec.postal_code);
+  const match = findGmapsMatch(rec.siret, rec.company_name, rec.postal_code, null, rec.phone);
   if (!match) return;
 
   if (match.website) rec.website = match.website;
